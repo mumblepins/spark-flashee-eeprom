@@ -42,27 +42,35 @@ FlashDevice::~FlashDevice() { }
  * constructors in different modules are called in arbitrary order.
  * @return The FlashDevice that provides access to the user accessible flash region.
  */
-FlashDeviceRegion& Devices::userFlash()
+FlashDeviceRegion& Devices::userFlash(ExtSpiFlash *extSpiFlash)
 {
-#if defined(SPARK)
-    #if defined(HAS_SERIAL_FLASH)
-        static SparkExternalFlashDevice directFlash;
-        #if PLATFORM_ID<3
-                // the Core reserves the first 512kB of the external flash for system use
-                static FlashDeviceRegion userRegion(directFlash, 0x80000, 0x200000);
+    extern FlashDeviceRegion userRegion;
+    if (extSpiFlash != NULL) {
+        // We use external SPI flash
+        static ExternalSPIFlashDevice directFlash(extSpiFlash);
+        static FlashDeviceRegion userRegion(directFlash, 0x0, extSpiFlash->pageSize() * extSpiFlash->pageCount());
+    } else {
+        // Use onboard flash (either from Spark or P1, or EEPROM, or for testing)
+        #if defined(SPARK)
+            #if defined(HAS_SERIAL_FLASH)
+                static SparkExternalFlashDevice directFlash;
+                #if PLATFORM_ID<3
+                    // the Core reserves the first 512kB of the external flash for system use
+                    static FlashDeviceRegion userRegion(directFlash, 0x80000, 0x200000);
+                #else
+                    // other platforms with external serial flash
+                    static FlashDeviceRegion userRegion(directFlash, 0x0, sFLASH_PAGESIZE*sFLASH_PAGECOUNT);
+                #endif
+            #else
+                static EepromFlashDevice directFlash;
+                static FlashDeviceRegion userRegion(directFlash,0, directFlash.length());
+            #endif
         #else
-                // other platforms with external serial flash
-                static FlashDeviceRegion userRegion(directFlash, 0x0, sFLASH_PAGESIZE*sFLASH_PAGECOUNT);
+            // emulation/testing
+            static FakeFlashDevice directFlash(512, 4096);
+            static FlashDeviceRegion userRegion(directFlash, 0x80000, 0x200000);
         #endif
-    #else
-        static EepromFlashDevice directFlash;
-        static FlashDeviceRegion userRegion(directFlash,0, directFlash.length());
-    #endif
-#else
-    // emulation/testing
-    static FakeFlashDevice directFlash(512, 4096);
-    static FlashDeviceRegion userRegion(directFlash, 0x80000, 0x200000);
-#endif
+    }
     return userRegion;
 }
 
@@ -276,5 +284,3 @@ DWORD get_fattime() {
 }
 
 }
-
-

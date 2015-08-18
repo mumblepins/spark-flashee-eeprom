@@ -26,6 +26,7 @@
 #include "string.h"
 #include "stdlib.h"
 #include "FlashIO.h"
+#include "ext_spi_flash.h"
 
 namespace Flashee {
 
@@ -528,6 +529,18 @@ private:
         return mapper;
     }
 
+    inline static FlashDevice* createMultiPageEraseImpl(ExtSpiFlash *extSpiFlash, flash_addr_t startAddress, flash_addr_t endAddress, page_count_t freePageCount) {
+        if (endAddress == flash_addr_t(-1))
+            endAddress = startAddress + userFlash(extSpiFlash).pageAddress(256);
+        if (freePageCount < 2 || freePageCount >= ((endAddress - startAddress) / userFlash(extSpiFlash).pageSize()))
+            return NULL;
+        FlashDevice* userFlash = createUserFlashRegion(extSpiFlash, startAddress, endAddress);
+        if (userFlash==NULL)
+            return NULL;
+        FlashDevice* mapper = createLogicalPageMapper(userFlash, userFlash->pageCount() - freePageCount);
+        return mapper;
+    }
+
 public:
 
     /**
@@ -540,30 +553,41 @@ public:
      * When running on the Photon, this region points to the EEPROM emulation. (So flashee is just a wrapper
      * for code-compatibility - no wear levelling is done.)
      */
-    static FlashDeviceRegion& userFlash();
+    static FlashDeviceRegion& userFlash(ExtSpiFlash *extSpiFlash = NULL);
 
-    static FlashDevice* createDefaultStore()
+    static FlashDevice* createDefaultStore(ExtSpiFlash *extSpiFlash = NULL)
     {
-#if defined(SPARK)
-    #if PLATFORM_ID<3
-            return createAddressErase();
-    #elif PLATFORM_ID==4 || PLATFORM_ID==6 || PLATFORM_ID==10
-            return new EepromFlashDevice();
-    #elif PLATFORM_ID==5 || PLATFORM_ID==7 || PLATFORM_ID==8
-           // P1
-            return createAddressErase();
-    #else
-    #error Unknown Platform
-    #endif
-#else
-    return &userFlash();
-#endif
+        if (extSpiFlash != NULL) {
+             // We use external SPI flash
+             return createAddressErase( extSpiFlash);
+        } else {
+        #if defined(SPARK)
+            #if PLATFORM_ID<3
+                    return createAddressErase();
+            #elif PLATFORM_ID==4 || PLATFORM_ID==6 || PLATFORM_ID==10
+                    return new EepromFlashDevice();
+            #elif PLATFORM_ID==5 || PLATFORM_ID==7 || PLATFORM_ID==8
+                   // P1
+                    return createAddressErase();
+            #else
+            #error Unknown Platform
+            #endif
+        #else
+            return &userFlash();
+        #endif
+        }
     }
 
     static FlashDevice* createUserFlashRegion(flash_addr_t startAddress, flash_addr_t endAddress, page_count_t minPageCount=1) {
         if (((endAddress-startAddress)/userFlash().pageSize())<minPageCount)
             return NULL;
         return userFlash().createSubregion(startAddress, endAddress);
+    }
+
+    static FlashDevice* createUserFlashRegion(ExtSpiFlash *extSpiFlash, flash_addr_t startAddress, flash_addr_t endAddress, page_count_t minPageCount=1) {
+        if (((endAddress-startAddress)/userFlash(extSpiFlash).pageSize())<minPageCount)
+            return NULL;
+        return userFlash(extSpiFlash).createSubregion(startAddress, endAddress);
     }
 
 
@@ -582,6 +606,16 @@ public:
         return NULL;
     }
 
+    static FlashDevice* createSinglePageErase(ExtSpiFlash *extSpiFlash, flash_addr_t startAddress, flash_addr_t endAddress) {
+        FlashDevice* userFlash = createUserFlashRegion(extSpiFlash, startAddress, endAddress);
+        if (userFlash!=NULL) {
+            SinglePageWear* wear = new SinglePageWear(*userFlash);
+            return new PageSpanFlashDevice(*wear);
+        }
+        return NULL;
+    }
+
+
     /**
      * Creates a flash device where destructive writes cause a page erase, and
      * the page erases are levelled out over the available free pages.
@@ -599,6 +633,11 @@ Must align on a page boundary.
         return mapper == NULL ? NULL : new PageSpanFlashDevice(*mapper);
     }
 
+    static FlashDevice* createWearLevelErase(ExtSpiFlash *extSpiFlash, flash_addr_t startAddress = 0, flash_addr_t endAddress = flash_addr_t(-1), page_count_t freePageCount = 2) {
+        FlashDevice* mapper = createMultiPageEraseImpl(extSpiFlash, startAddress, endAddress, freePageCount);
+        return mapper == NULL ? NULL : new PageSpanFlashDevice(*mapper);
+    }
+
     /**
      * Creates a flash device where destructive writes do not require a page erase,
      * and when a page erase is required, it is wear-levelled out over the available
@@ -610,8 +649,16 @@ Must align on a page boundary.
      *
      *  NB: This method has the same requirements for start and end addresses as createWearLevelErase()
      */
-    static FlashDevice* createAddressErase(flash_addr_t startAddress = 0, flash_addr_t endAddress = flash_addr_t(-1), page_count_t freePageCount = 2) {
+    static FlashDevice* createAddressErase(flash_addr_t startAddress = 0, flash_addr_t endAddress = flash_addr_t(-1), page_count_t freePageCount = 2 ) {
         FlashDevice* mapper = createMultiPageEraseImpl(startAddress, endAddress, freePageCount);
+        if (mapper == NULL)
+            return NULL;
+        FlashDevice* multi = createMultiWrite(mapper);
+        return new PageSpanFlashDevice(*multi);
+    }
+
+    static FlashDevice* createAddressErase(ExtSpiFlash *extSpiFlash, flash_addr_t startAddress = 0, flash_addr_t endAddress = flash_addr_t(-1), page_count_t freePageCount = 2) {
+        FlashDevice* mapper = createMultiPageEraseImpl(extSpiFlash, startAddress, endAddress, freePageCount);
         if (mapper == NULL)
             return NULL;
         FlashDevice* multi = createMultiWrite(mapper);
@@ -634,6 +681,11 @@ Must align on a page boundary.
      */
     static CircularBuffer* createCircularBuffer(flash_addr_t startAddress, flash_addr_t endAddress) {
         FlashDevice* device = createUserFlashRegion(startAddress, endAddress, 2);
+        return device ? new CircularBuffer(*device) : NULL;
+    }
+
+    static CircularBuffer* createCircularBuffer(ExtSpiFlash *extSpiFlash, flash_addr_t startAddress, flash_addr_t endAddress) {
+        FlashDevice* device = createUserFlashRegion(extSpiFlash, startAddress, endAddress, 2);
         return device ? new CircularBuffer(*device) : NULL;
     }
 
